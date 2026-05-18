@@ -9,6 +9,8 @@ FrameWeb frame;
 // Test server/client UDP
 #include <WiFiServer.h>
 WiFiServer server(5000);  // TCP server on port 5000
+// Externel Seriel TX->GPIO4 RX->GPIO36
+//HardwareSerial Serial1; // Use UART1 for external serial communication
 
 #include <time.h>
 // Reset Reason 
@@ -24,6 +26,45 @@ WiFiServer server(5000);  // TCP server on port 5000
 } while (0)
 
 const char VERSION[] ="0.0.1";
+
+volatile uint32_t tcpCharsReceived = 0;
+volatile uint32_t tcpCharsSent = 0;
+portMUX_TYPE tcpCountersMux = portMUX_INITIALIZER_UNLOCKED;
+
+String formatIpAddress(const IPAddress& ip) {
+  if (ip == IPAddress((uint32_t)0)) {
+    return "not connected";
+  }
+  return ip.toString();
+}
+
+void addTcpCounters(uint32_t rxInc, uint32_t txInc) {
+  portENTER_CRITICAL(&tcpCountersMux);
+  tcpCharsReceived += rxInc;
+  tcpCharsSent += txInc;
+  portEXIT_CRITICAL(&tcpCountersMux);
+}
+
+void refreshExternalHtmlTools() {
+  uint32_t rx = 0;
+  uint32_t tx = 0;
+  portENTER_CRITICAL(&tcpCountersMux);
+  rx = tcpCharsReceived;
+  tx = tcpCharsSent;
+  portEXIT_CRITICAL(&tcpCountersMux);
+
+  frame.externalHtmlTools =
+    "<div class='action-item'><div>- Network addresses</div><div class='button-group'>"
+    "<span>WiFi: <b>" + formatIpAddress(WiFi.localIP()) + "</b></span>"
+    "<span>Cable: <b>" + formatIpAddress(ETH.localIP()) + "</b></span>"
+    "</div></div>"
+    "<div class='action-item'><div>- TCP chars</div><div class='button-group'>"
+    "<span>Received: <b>" + String(rx) + "</b></span>"
+    "<span>Sent: <b>" + String(tx) + "</b></span>"
+    "</div></div>"
+    "<div class='action-item'><div>- Specific home page is visible at :</div>"
+    "<div class='button-group'><a class='button' href='/index'>Index</a></div></div>";
+}
 
 // Main variables
 bool eth_connected = false;
@@ -116,16 +157,16 @@ TaskHandle_t tcpCxHandle = NULL;
 void IRAM_ATTR tcpTask(void *pvParameter) {
   LOG("%s +Start tcpTask",getDate().c_str());
   // Only one TCP client is bridged at a time.
-  WiFiClient activeClient;
+  WiFiClient ethClient;
 
   while (1) {
       // Accept a new client without blocking the task loop.
       WiFiClient incomingClient = server.available();
       if (incomingClient) {
-        if (!activeClient || !activeClient.connected()) {
-          activeClient = incomingClient;
+        if (!ethClient || !ethClient.connected()) {
+          ethClient = incomingClient;
           // Send a banner so terminal clients know the bridge is active.
-          activeClient.write("Welcome to ESP32 TCP Server\r\n");
+          ethClient.write("; Welcome to ESP32 TCP Server <-> Prusa Mk3s\r\n");
           Serial.println("Client connecté:" + incomingClient.remoteIP().toString() + ":" + String(incomingClient.remotePort()));
         } else {
           // Refuse extra clients while one session is already attached to the serial bridge.
@@ -134,21 +175,30 @@ void IRAM_ATTR tcpTask(void *pvParameter) {
         }
       }
 
-      if (activeClient && activeClient.connected()) {
+      if (ethClient && ethClient.connected()) {
+        uint32_t rxCount = 0;
+        uint32_t txCount = 0;
+
         // Forward every received TCP byte directly to the UART.
-        while (activeClient.available() > 0) {
-          int c = activeClient.read();
+        while (ethClient.available() > 0) {
+          int c = ethClient.read();
           if (c >= 0) {
-            Serial.write((uint8_t)c);
+            Serial1.write((uint8_t)c);
+            rxCount++;
           }
         }
 
-        // Mirror every serial byte back to the active TCP client.
-        while (Serial.available() > 0) {
-          int c = Serial.read();
+        // Mirror every serial1 byte back to the active TCP client.
+        while (Serial1.available() > 0) {
+          int c = Serial1.read();
           if (c >= 0) {
-            activeClient.write((uint8_t)c);
+            ethClient.write((uint8_t)c);
+            txCount++;
           }
+        }
+
+        if (rxCount > 0 || txCount > 0) {
+          addTcpCounters(rxCount, txCount);
         }
       } 
 
@@ -162,6 +212,8 @@ void setup() {
 
   Serial.begin(115200);
   Serial.printf("Start setup Ver:%s\n\r",VERSION);
+
+  Serial1.begin(115200, SERIAL_8N1, 36, 4); // Initialize external serial communication
 
   // Start framework
   frame.setup();
@@ -180,7 +232,7 @@ void setup() {
   // Server 
   server.begin();
 
-  frame.externalHtmlTools="Specific home page is visible at :<a class='button' href='/index'>Index</a>";
+  refreshExternalHtmlTools();
   // Init time and correct 
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer); //init and get the time
   setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
@@ -212,6 +264,8 @@ void loop() {
     getLocalTime(&timeinfo);
    
     int wifistat = WiFi.status();
+
+    refreshExternalHtmlTools();
 
     // This recovery logic supervises the Wi-Fi station side independently from Ethernet.
     if (wifistat != WL_CONNECTED) {
