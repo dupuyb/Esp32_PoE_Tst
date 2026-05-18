@@ -27,6 +27,23 @@ The active firmware (`main_all_udp.cpp`) implements a bidirectional TCP ↔ Seri
 - `src/main_bt.cpp`: Bluetooth-specific experiments
 - `platformio.ini`: build configuration, ports, dependencies, and source selection
 
+## Before Building — Select the Entry Point
+
+This project contains several `main_*.cpp` files. Only **one** must be compiled at a time.
+Edit `platformio.ini` and update `build_src_filter` to exclude all entry points except the one you want:
+
+```ini
+build_src_filter = +<*>
+   -<.git/>
+   -<.svn/>
+   -<main_wifi.cpp>      ; exclude
+   -<main_bt.cpp>        ; exclude
+   -<main_eth.cpp>       ; exclude
+   ; keep main_all_udp.cpp (not listed = included)
+```
+
+> **Note:** Forgetting to update `build_src_filter` will cause multiple `setup()`/`loop()` definition errors at link time.
+
 ## Build
 
 ```bash
